@@ -89,12 +89,12 @@ supported = {
     "test_vec_add.py",
     "test_mm.py",
     "test_reduce.py",
-    "test_sum_reduce_triton.py",
     "test_layernorm.py",
 
     # QC-internal tests
     "test_activations.py",
-    "test_flash_attention.py"
+    "test_flash_attention.py",
+    "test_sum_reduce_triton.py"
 }
 
 def pytest_collection_modifyitems(config, items):

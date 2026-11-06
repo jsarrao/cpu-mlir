@@ -43,119 +43,91 @@ def sum_reduce_rank1_kernel(input_ptr, output_ptr, d0: tl.constexpr,
 
 
 @triton.jit
-def sum_reduce_rank2_ragged_inner_kernel(input_ptr, output_ptr,
-                                         d0: tl.constexpr, d1: tl.constexpr,
-                                         p0: tl.constexpr, p1: tl.constexpr):
-    offsets = tl.arange(0, p0 * p1)
-    row = offsets // p1
-    col = offsets % p1
-    mask = (row < d0) & (col < d1)
-    value = tl.load(input_ptr + row * d1 + col, mask=mask, other=0.0)
-    result = tl.sum(value.reshape(p0, p1), axis=1)
-    output_offsets = tl.arange(0, p0)
-    tl.store(output_ptr + output_offsets, result, mask=output_offsets < d0)
+def sum_reduce_blocks_kernel(input_ptr, partial_ptr, n_elements: tl.constexpr,
+                             block_size: tl.constexpr):
+    block_id = tl.program_id(0)
+    offsets = block_id * block_size + tl.arange(0, block_size)
+    value = tl.load(input_ptr + offsets, mask=offsets < n_elements, other=0.0)
+    tl.store(partial_ptr + block_id, tl.sum(value, axis=0))
 
 
 @triton.jit
-def sum_reduce_rank3_ragged_tail_kernel(input_ptr, output_ptr,
-                                        d0: tl.constexpr, d1: tl.constexpr,
-                                        d2: tl.constexpr, p0: tl.constexpr,
-                                        p1: tl.constexpr, p2: tl.constexpr):
-    offsets = tl.arange(0, p0 * p1 * p2)
-    i0 = offsets // (p1 * p2)
-    i1 = (offsets // p2) % p1
-    i2 = offsets % p2
-    mask = (i0 < d0) & (i1 < d1) & (i2 < d2)
-    value = tl.load(
-        input_ptr + (i0 * d1 + i1) * d2 + i2, mask=mask, other=0.0
-    ).reshape(p0, p1, p2)
-    result = tl.sum(tl.sum(value, axis=2), axis=1)
-    output_offsets = tl.arange(0, p0)
-    tl.store(output_ptr + output_offsets, result, mask=output_offsets < d0)
+def sum_reduce_rank2_outer_kernel(input_ptr, output_ptr, d0: tl.constexpr,
+                                  d1: tl.constexpr, block_size: tl.constexpr):
+    cols = tl.program_id(0) * block_size + tl.arange(0, block_size)
+    result = tl.zeros((block_size,), tl.float32)
+    for row in range(0, d0):
+        result += tl.load(input_ptr + row * d1 + cols, mask=cols < d1, other=0.0)
+    tl.store(output_ptr + cols, result, mask=cols < d1)
 
 
 @triton.jit
-def sum_reduce_rank4_ragged_full_kernel(input_ptr, output_ptr,
-                                        d0: tl.constexpr, d1: tl.constexpr,
-                                        d2: tl.constexpr, d3: tl.constexpr,
-                                        p0: tl.constexpr, p1: tl.constexpr,
-                                        p2: tl.constexpr, p3: tl.constexpr):
-    offsets = tl.arange(0, p0 * p1 * p2 * p3)
-    i0 = offsets // (p1 * p2 * p3)
-    i1 = (offsets // (p2 * p3)) % p1
-    i2 = (offsets // p3) % p2
-    i3 = offsets % p3
-    mask = (i0 < d0) & (i1 < d1) & (i2 < d2) & (i3 < d3)
-    value = tl.load(
-        input_ptr + ((i0 * d1 + i1) * d2 + i2) * d3 + i3,
-        mask=mask,
-        other=0.0,
-    ).reshape(p0, p1, p2, p3)
-    value = tl.sum(tl.sum(tl.sum(tl.sum(value, axis=3), axis=2), axis=1), axis=0)
-    tl.store(output_ptr, value)
+def sum_reduce_rank2_inner_kernel(input_ptr, output_ptr, d1: tl.constexpr,
+                                  block_size: tl.constexpr):
+    row = tl.program_id(0)
+    cols = tl.arange(0, block_size)
+    value = tl.load(input_ptr + row * d1 + cols, mask=cols < d1, other=0.0)
+    tl.store(output_ptr + row, tl.sum(value, axis=0))
 
 
 @triton.jit
-def sum_reduce_rank2_kernel(input_ptr, output_ptr, d0: tl.constexpr,
-                            d1: tl.constexpr, reduction_mode: tl.constexpr,
-                            output_numel: tl.constexpr):
-    input_desc = tl.make_tensor_descriptor(
-        base=input_ptr, shape=[d0 * d1], strides=[1], block_shape=[d0 * d1]
-    )
-    output_desc = tl.make_tensor_descriptor(
-        base=output_ptr, shape=[output_numel], strides=[1],
-        block_shape=[output_numel]
-    )
-    value = input_desc.load([0]).reshape(d0, d1)
-    if reduction_mode == 0:
-        value = tl.sum(value, axis=0)
-    else:
-        value = tl.sum(value, axis=1)
-    output_desc.store([0], value.reshape(output_numel))
+def sum_reduce_rank3_middle_kernel(input_ptr, output_ptr, d1: tl.constexpr,
+                                   d2: tl.constexpr,
+                                   block_size: tl.constexpr):
+    i0 = tl.program_id(0)
+    cols = tl.program_id(1) * block_size + tl.arange(0, block_size)
+    result = tl.zeros((block_size,), tl.float32)
+    for i1 in range(0, d1):
+        result += tl.load(
+            input_ptr + (i0 * d1 + i1) * d2 + cols,
+            mask=cols < d2,
+            other=0.0,
+        )
+    tl.store(output_ptr + i0 * d2 + cols, result, mask=cols < d2)
 
 
 @triton.jit
-def sum_reduce_rank3_kernel(input_ptr, output_ptr, d0: tl.constexpr,
-                            d1: tl.constexpr, d2: tl.constexpr,
-                            reduction_mode: tl.constexpr,
-                            output_numel: tl.constexpr):
-    input_desc = tl.make_tensor_descriptor(
-        base=input_ptr, shape=[d0 * d1 * d2], strides=[1],
-        block_shape=[d0 * d1 * d2]
-    )
-    output_desc = tl.make_tensor_descriptor(
-        base=output_ptr, shape=[output_numel], strides=[1],
-        block_shape=[output_numel]
-    )
-    value = input_desc.load([0]).reshape(d0, d1, d2)
-    if reduction_mode == 0:
-        value = tl.sum(value, axis=1)
-    elif reduction_mode == 1:
-        value = tl.sum(value, axis=2)
-    else:
-        value = tl.sum(tl.sum(value, axis=2), axis=1)
-    output_desc.store([0], value.reshape(output_numel))
+def sum_reduce_rank3_inner_kernel(input_ptr, output_ptr, d2: tl.constexpr,
+                                  block_size: tl.constexpr):
+    row = tl.program_id(0)
+    cols = tl.arange(0, block_size)
+    value = tl.load(input_ptr + row * d2 + cols, mask=cols < d2, other=0.0)
+    tl.store(output_ptr + row, tl.sum(value, axis=0))
 
 
 @triton.jit
-def sum_reduce_rank4_kernel(input_ptr, output_ptr, d0: tl.constexpr,
-                            d1: tl.constexpr, d2: tl.constexpr,
-                            d3: tl.constexpr, reduction_mode: tl.constexpr,
-                            output_numel: tl.constexpr):
-    input_desc = tl.make_tensor_descriptor(
-        base=input_ptr, shape=[d0 * d1 * d2 * d3], strides=[1],
-        block_shape=[d0 * d1 * d2 * d3]
-    )
-    output_desc = tl.make_tensor_descriptor(
-        base=output_ptr, shape=[output_numel], strides=[1],
-        block_shape=[output_numel]
-    )
-    value = input_desc.load([0]).reshape(d0, d1, d2, d3)
-    if reduction_mode == 0:
-        value = tl.sum(tl.sum(value, axis=2), axis=0)
-    else:
-        value = tl.sum(tl.sum(tl.sum(tl.sum(value, axis=3), axis=2), axis=1), axis=0)
-    output_desc.store([0], value.reshape(output_numel))
+def sum_reduce_rank3_tail_kernel(input_ptr, output_ptr, d1: tl.constexpr,
+                                 d2: tl.constexpr,
+                                 block_size: tl.constexpr):
+    i0 = tl.program_id(0)
+    cols = tl.arange(0, block_size)
+    result = 0.0
+    for i1 in range(0, d1):
+        row = tl.load(
+            input_ptr + (i0 * d1 + i1) * d2 + cols,
+            mask=cols < d2,
+            other=0.0,
+        )
+        result += tl.sum(row, axis=0)
+    tl.store(output_ptr + i0, result)
+
+
+@triton.jit
+def sum_reduce_rank4_noncontiguous_kernel(input_ptr, output_ptr,
+                                           d0: tl.constexpr, d1: tl.constexpr,
+                                           d2: tl.constexpr, d3: tl.constexpr,
+                                           block_size: tl.constexpr):
+    i1 = tl.program_id(0)
+    cols = tl.program_id(1) * block_size + tl.arange(0, block_size)
+    result = tl.zeros((block_size,), tl.float32)
+    for i0 in range(0, d0):
+        for i2 in range(0, d2):
+            result += tl.load(
+                input_ptr + ((i0 * d1 + i1) * d2 + i2) * d3 + cols,
+                mask=cols < d3,
+                other=0.0,
+            )
+    tl.store(output_ptr + i1 * d3 + cols, result, mask=cols < d3)
 
 
 def torch_sum(value, axes):
@@ -168,52 +140,61 @@ def next_power_of_2(value):
     return 1 << (value - 1).bit_length()
 
 
-def is_power_of_2(value):
-    return value > 0 and value & (value - 1) == 0
-
-
 def run_sum_reduce(value, axes):
     shape = tuple(value.shape)
     expected = torch_sum(value, axes)
     output = torch.empty_like(expected)
-    output_numel = math.prod(expected.shape) if expected.ndim else 1
 
     if len(shape) == 1:
         sum_reduce_rank1_kernel[(1,)](
             value, output, shape[0], next_power_of_2(shape[0])
         )
     elif len(shape) == 2:
-        if axes == (1,) and not is_power_of_2(math.prod(shape)):
-            p0, p1 = (next_power_of_2(dim) for dim in shape)
-            sum_reduce_rank2_ragged_inner_kernel[(1,)](
-                value, output, *shape, p0, p1
+        d0, d1 = shape
+        block_size = next_power_of_2(d1)
+        if axes == (0,):
+            sum_reduce_rank2_outer_kernel[(triton.cdiv(d1, block_size),)](
+                value, output, d0, d1, block_size
             )
         else:
-            reduction_mode = 0 if axes == (0,) else 1
-            sum_reduce_rank2_kernel[(1,)](
-                value, output, *shape, reduction_mode, output_numel
+            sum_reduce_rank2_inner_kernel[(d0,)](
+                value, output, d1, block_size
             )
     elif len(shape) == 3:
-        if axes == (1, 2) and not is_power_of_2(math.prod(shape)):
-            p0, p1, p2 = (next_power_of_2(dim) for dim in shape)
-            sum_reduce_rank3_ragged_tail_kernel[(1,)](
-                value, output, *shape, p0, p1, p2
+        d0, d1, d2 = shape
+        block_size = next_power_of_2(d2)
+        if axes == (1,):
+            sum_reduce_rank3_middle_kernel[(d0, triton.cdiv(d2, block_size))](
+                value, output, d1, d2, block_size
+            )
+        elif axes == (2,):
+            sum_reduce_rank3_inner_kernel[(d0 * d1,)](
+                value, output, d2, block_size
             )
         else:
-            reduction_mode = {(1,): 0, (2,): 1, (1, 2): 2}[axes]
-            sum_reduce_rank3_kernel[(1,)](
-                value, output, *shape, reduction_mode, output_numel
+            sum_reduce_rank3_tail_kernel[(d0,)](
+                value, output, d1, d2, block_size
             )
     else:
-        if axes == (0, 1, 2, 3) and not is_power_of_2(math.prod(shape)):
-            p0, p1, p2, p3 = (next_power_of_2(dim) for dim in shape)
-            sum_reduce_rank4_ragged_full_kernel[(1,)](
-                value, output, *shape, p0, p1, p2, p3
+        d0, d1, d2, d3 = shape
+        if axes == (0, 2):
+            block_size = next_power_of_2(d3)
+            sum_reduce_rank4_noncontiguous_kernel[(d1, triton.cdiv(d3, block_size))](
+                value, output, d0, d1, d2, d3, block_size
             )
         else:
-            reduction_mode = 0 if axes == (0, 2) else 1
-            sum_reduce_rank4_kernel[(1,)](
-                value, output, *shape, reduction_mode, output_numel
+            # A staged reduction is the usual Triton formulation for an
+            # all-elements reduction that is larger than one practical tile.
+            block_size = 1024
+            numel = math.prod(shape)
+            num_partials = triton.cdiv(numel, block_size)
+            partials = torch.empty((num_partials,), device=value.device,
+                                   dtype=value.dtype)
+            sum_reduce_blocks_kernel[(num_partials,)](
+                value, partials, numel, block_size
+            )
+            sum_reduce_rank1_kernel[(1,)](
+                partials, output, num_partials, next_power_of_2(num_partials)
             )
     return output, expected
 

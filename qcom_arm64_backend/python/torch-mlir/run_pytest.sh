@@ -7,10 +7,7 @@
 #   https://github.com/qualcomm/cpu-mlir/LICENSE.txt
 #
 # ===------------------------------------------------------------------------===
-
 SCRIPT_DIR="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")"
-
-set -x
 
 # Include dirs
 export ARM64_BACKEND_PATH="$SCRIPT_DIR/../.."
